@@ -146,6 +146,29 @@ class IHandler(object):
         return Response(data, content_type = "application/json")
     #}
 
+    def _ensure_fields(self, data, keys):
+        for key in keys:
+            if key not in data:
+                msg = "Missing required field '%s'" % (key)
+                raise WebError(msg, 400)
+
+    def _find_layer(self, name):
+        """
+        Find the layer with the given name.
+        """
+        layers = self._config["layers"]
+        for (idx, layer) in enumerate(layers):
+            if layer["name"] == name:
+                return (idx, layer)
+        return (-1, None)
+
+    def _get_item(self, key):
+        """
+        Attempt to find the item with the given key.
+        """
+        items = self._config[self.__class__.sConfigKey]
+        return items.get(key, None)
+
     def _validate_config(self, config):
         """
         Attempt to validate the given configuration. Raises an exception if the
@@ -279,6 +302,117 @@ class ConfigPackListHandler(PackHandler):
 
         # Write the configuration to disk.
         self._write_config(new_config)
+
+
+class ListHandler(IHandler):
+    """
+    Base request handler that allows access to a list of configuration items.
+
+    @cvar sUrlRegEx: Set to None to indicate this is an abstract class.
+    """
+    sUrlRegEx       = None
+    sConfigKey      = None
+    sRequiredFields = ()
+    sItemPrefix     = None
+
+    def get(self, req):
+        """
+        Return all configuration items under our config key.
+        """
+        items = self._config[self.__class__.sConfigKey]
+        return self._build_json_response(items)
+
+    def post(self, req):
+        """
+        Create a new item using the content of the request.
+        """
+        data = self._get_json_content(req)
+
+        # Ensure that we have a name and sources for the new layer.
+        klass = self.__class__
+        self._ensure_fields(data, klass.sRequiredFields)
+
+        if 1 != len(data):
+            return Response("Request must contain exactly one item.",  status = 400)
+
+        (name, val) = next(iter(data.viewitems()))
+
+        # Verify that we don't already have a layer with the same name.
+        existing = self._get_item(name)
+        if existing is not None:
+            return Response("'%s' already exists." % (name), status = 400)
+
+        # Validate the configuration with the new layer.
+        new_config = dict(self._config)
+        new_config[klass.sConfigKey][name] = val
+        self._validate_config(new_config)
+
+        # Write the configuration to disk.
+        self._write_config(new_config)
+
+        res = self._build_json_response(data)
+        res.headers["Location"] = klass.sItemPrefix + name
+        return res
+
+
+class ItemHandler(IHandler):
+    """
+    Base request handler that allows access to specific items.
+
+    @cvar sUrlRegEx: Set to None to indicate this is an abstract class.
+    """
+    sUrlRegEx       = None
+    sConfigKey      = None
+    sRequiredFields = None
+
+    def get(self, req, name):
+        """
+        Return configuration for the named item.
+        """
+        item = self._get_item(name)
+        if item is None:
+            raise WebError("Layer '%s' not found" % name, 404)
+        return self._build_json_response(item)
+
+    def put(self, req, name):
+        """
+        Update the configuration for the named item.
+        """
+        # Get the JSON content.
+        data = self._get_json_content(req)
+
+        # Ensure that we have a name and sources for the new layer.
+        klass = self.__class__
+        self._ensure_fields(data, klass.sRequiredFields)
+
+        item = self._get_item(name)
+        if item is None:
+            raise WebError("Item '%s' not found" % (name), 404)
+
+        # Validate the configuration with the new layer.
+        new_config = dict(self._config)
+        new_config[klass.sConfigKey][name] = data
+        self._validate_config(new_config)
+
+        # Write the configuration to disk.
+        self._write_config(new_config)
+
+        return self._build_json_response(data)
+
+    def delete(self, req, name):
+        """
+        Delete the item with the given name.
+        """
+        item = self._get_item(name)
+        if item is None:
+            raise WebError("Layer '%s' not found" % (name), 404)
+
+        new_config = dict(self._config)
+        del new_config[self.__class__.sConfigKey][name]
+        self._validate_config(new_config)
+
+        # Write the configuration to disk.
+        self._write_config(new_config)
         return self._build_json_response(new_config)
 
 
@@ -351,6 +485,145 @@ class ConfigPackHandler(PackHandler):
             raise WebError(msg, 404)
 
         # Validate the configuration with the new layer.
+        self._validate_config(new_config)
+
+        # Write the configuration to disk.
+        self._write_config(new_config)
+        return Response("")
+
+    #{ Helpers
+    def _get_item(self, key):
+        """
+        Attempt to find the item with the given key.
+        """
+        items = self._config[self.__class__.sConfigKey]
+        return items.get(key, None)
+    #}
+
+
+class CachesHandler(ListHandler):
+    """
+    Handler that returns all caches and allows creating new caches.
+    """
+    sUrlRegEx       = "/config/cache"
+    sConfigKey      = "caches"
+    sRequiredFields = ()
+    sItemPrefix     = "/cache/"
+
+class CacheHandler(ItemHandler):
+    """
+    Handler that allows reading, modifying and deleting caches.
+    """
+    sUrlRegEx       = "/config/cache/(.+)"
+    sConfigKey      = "caches"
+    sRequiredFields = ()
+
+
+class SourcesHandler(ListHandler):
+    """
+    Handler that returns all caches and allows creating new sources.
+    """
+    sUrlRegEx       = "/config/source"
+    sConfigKey      = "sources"
+    sRequiredFields = ()
+    sItemPrefix     = "/source/"
+
+
+class SourceHandler(ItemHandler):
+    """
+    Handler that allows reading, modifying and deleting sources.
+    """
+    sUrlRegEx       = "/config/source/(.+)"
+    sConfigKey      = "sources"
+    sRequiredFields = ()
+    # WMS: type, url, supported_srs, supported_formats
+    # TODO: When we delete a source we need to remove all layers that depend on it.
+
+
+class LayersHandler(ListHandler):
+    """
+    Handler that returns all caches and allows creating new layers.
+    """
+    sUrlRegEx  = "/config/layer"
+    sConfigKey = "layers"
+
+    def post(self, req):
+        """
+        Create a new layer using the request's content.
+        """
+        data = self._get_json_content(req)
+
+        # Ensure that we have a name and sources for the new layer.
+        self._ensure_fields(data, ("name", "sources"))
+
+        # Verify that we don't already have a layer with the same name.
+        layer_name = data["name"]
+        idx = self._find_layer(data["name"])[0]
+        if idx >= 0:
+            return Response("Layer '%s' already exists." % (layer_name), status = 400)
+
+        # Validate the configuration with the new layer.
+        new_config = dict(self._config)
+        new_config["layers"].append(data)
+        self._validate_config(new_config)
+
+        # Write the configuration to disk.
+        self._write_config(new_config)
+
+        res = self._build_json_response(data)
+        res.headers["Location"] = "/layer/%s" % (data["name"])
+        return res
+
+
+class LayerHandler(IHandler):
+    """
+    Handler that allows reading, modifying and deleting layers.
+    """
+    sUrlRegEx = "/config/layer/(.+)"
+
+    def get(self, req, name):
+        """
+        Return configuration details for layer.
+        """
+        layer = self._find_layer(name)[1]
+        if layer is None:
+            raise WebError("Layer '%s' not found" % name, 404)
+        return self._build_json_response(layer)
+
+    def put(self, req, name):
+        """
+        Update the configuration for the layer with the given name.
+        """
+        # Get the JSON content.
+        data = self._get_json_content(req)
+
+        # Ensure that we have a name and sources for the new layer.
+        self._ensure_fields(data, ("name", "sources"))
+
+        (idx, layer) = self._find_layer(data["name"])
+        if idx < 0:
+            raise WebError("Layer '%s' not found" % (name), 404)
+
+        # Validate the configuration with the new layer.
+        new_config = dict(self._config)
+        new_config["layers"][idx] = data
+        self._validate_config(new_config)
+
+        # Write the configuration to disk.
+        self._write_config(new_config)
+
+        return self._build_json_response(data)
+
+    def delete(self, req, name):
+        """
+        Remove the layer with the given name.
+        """
+        idx = self._find_layer(name)[0]
+        if idx < 0:
+            raise WebError("Layer '%s' not found" % (name), 404)
+
+        new_config = dict(self._config)
+        del new_config["layers"][idx]
         self._validate_config(new_config)
 
         # Write the configuration to disk.
