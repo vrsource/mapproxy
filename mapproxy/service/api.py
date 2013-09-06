@@ -1,6 +1,7 @@
 """
 API service handler
 """
+import copy
 import inspect
 import json
 import os
@@ -190,3 +191,168 @@ class ConfigHandler(IHandler):
         # Write the configuration to disk.
         self._write_config(new_config)
         return self._build_json_response(self._config)
+
+
+class PackHandler(IHandler):
+    """
+    Base REST handler that contains shared helper methods.
+    """
+    def _find_layer(self, name):
+        """
+        Find the layer with the given name.
+        """
+        layers = self._config["layers"]
+        for (idx, layer) in enumerate(layers):
+            if layer["name"] == name:
+                return (idx, layer)
+        return (-1, None)
+
+
+class ConfigPackListHandler(PackHandler):
+    """
+    REST handler that allows the user to add a new configuration pack. This
+    includes a layer, cache and source configuration. The source field for the
+    layer and cache are automatically filled in to match the unique layer name.
+
+        "layer": {
+            "name": "UID",
+            "title": "State of Maryland - Wind Energy Area"
+        },
+        "cache": {
+            "grids": ["GLOBAL_WEBMERCATOR","GLOBAL_GEODETIC"],
+            "format": "image/png"
+        },
+        "source": {
+            "req": {
+                "url": "http://something.com/"
+            },
+            "type": "wms"
+        }
+    """
+    sUrlRegEx  = "/config/pack"
+
+    def post(self, req):
+        """
+        Add the given configuration pack to our configuration.
+        """
+        # Ensure that we have valid JSON data.
+        content = self._get_json_content(req)
+        if content is None:
+            raise WebError("Invalid JSON", 400)
+
+        # Get the name that should be used.
+        layer = content.get("layer", None)
+        if layer is None:
+            raise WebError("Missing 'layer' value.", 400)
+        pack_name = layer.get("name", None)
+        if pack_name is None:
+            raise WebError("Missing 'name' for layer.", 400)
+
+        # Ensure that we don't already have a layer, cache or source with the
+        # given name.
+        existing = self._find_layer(pack_name)[1]
+        if existing is not None:
+            msg = "Already have a layer for '%s'" % (pack_name)
+            raise WebError(msg, 400)
+        for part in ("cache", "source"):
+            key = "%s_%s" % (pack_name, part)
+            if key in self._config[part + "s"]:
+                msg = "Already have a %s '%s'" % (part, key)
+                raise WebError(msg, 400)
+
+        # Create a deep copy of the configuration.
+        new_config = copy.deepcopy(self._config)
+        cache_name  = pack_name + "_cache"
+        source_name = pack_name + "_source"
+
+        # Add new layer, cache and source.
+        layer["sources"] = [cache_name]
+        new_config["layers"].append(layer)
+        cache = content["cache"]
+        cache["sources"] = [source_name]
+        new_config["caches"][cache_name] = cache
+        source = content["source"]
+        new_config["sources"][source_name] = source
+
+        # Validate the configuration with the new layer.
+        self._validate_config(new_config)
+
+        # Write the configuration to disk.
+        self._write_config(new_config)
+        return self._build_json_response(new_config)
+
+
+class ConfigPackHandler(PackHandler):
+    """
+    Request handler that allows querying and removing a set of related
+    configuration data.
+    """
+    sUrlRegEx  = "/config/pack/(.+)"
+
+    def get(self, req, packName):
+        """
+        Attempt to find a configuration pack with the given unique name.
+
+        @type  packName: str
+        @param packName: Unique name for the configuration pack.
+        """
+        # Attempt to find a cache and source with the given unique name.
+        result  = {}
+        missing = []
+        for part in ("cache", "source"):
+            key = "%s_%s" % (packName, part)
+            value = self._config[part + "s"].get(key, None)
+            if value is None:
+                missing.append(part)
+            result[part] = value
+
+        # Attempt to find a layer with the given unique name.
+        result["layer"] = self._find_layer(packName)[1]
+        if result["layer"] is None:
+            missing.append("layer")
+
+        # If the layer, cache or source were not found return an error message.
+        if len(missing) > 0:
+            msg = "Missing '%s'" % (", ".join(missing))
+            raise WebError(msg, 404)
+
+        return self._build_json_response(result)
+
+    def delete(self, req, packName):
+        """
+        Attempt to find a configuration pack with the given unique name.
+
+        @type  packName: str
+        @param packName: Unique name for the configuration pack.
+        """
+        # Make a deep copy of the configuration.
+        new_config = copy.deepcopy(self._config)
+
+        # Remove the layer with the given unique name.
+        missing = []
+        idx = self._find_layer(packName)[0]
+        if idx < 0:
+            missing.append("layer")
+        else:
+            del new_config["layers"][idx]
+
+        # Remove the cache and source.
+        for part in ("cache", "source"):
+            key  = part + "s"
+            name = "%s_%s" % (packName, part)
+            if name in new_config[key]:
+                del new_config[key][name]
+            else:
+                missing.append(part)
+
+        # If the layer, cache or source were not found return an error message.
+        if len(missing) > 0:
+            msg = "Missing '%s'" % (", ".join(missing))
+            raise WebError(msg, 404)
+
+        # Validate the configuration with the new layer.
+        self._validate_config(new_config)
+
+        # Write the configuration to disk.
+        self._write_config(new_config)
+        return Response("")
