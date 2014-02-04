@@ -159,7 +159,9 @@ class ProxyConfiguration(object):
         if layers_conf is None: return
 
         if isinstance(layers_conf, list):
-            if isinstance(layers_conf[0], dict) and len(layers_conf[0].keys()) == 1:
+            if 0 == len(layers_conf):
+                layers_conf = dict(title=None, layers=[])
+            elif isinstance(layers_conf[0], dict) and len(layers_conf[0].keys()) == 1:
                 # looks like ordered legacy config
                 layers_conf = self._legacy_layers_conf_dict()
             elif len(layers_conf) == 1 and (
